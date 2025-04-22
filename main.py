@@ -59,7 +59,11 @@ async def general_exception_handler(request, exc):
 # CORS middleware configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins in development
+    allow_origins=[
+        "http://localhost:3000",  # For local development
+        "https://final-app-deploy-6d92.onrender.com",  # For deployed backend
+        "https://final-app-deploy-2.onrender.com"  # For deployed frontend
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

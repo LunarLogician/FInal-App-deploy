@@ -87,21 +87,21 @@ export default function LeftPanelInput({
       formData.append('file', file);
       
       // Upload file to the correct endpoint
-      const uploadResponse = await fetch(`${API_CONFIG.MAIN_API_URL}${API_CONFIG.ENDPOINTS.UPLOAD}`, {
+      const response = await fetch(`${API_CONFIG.MAIN_API_URL}${API_CONFIG.ENDPOINTS.UPLOAD}`, {
         method: 'POST',
-        body: formData,
         headers: {
           'Accept': 'application/json',
         },
+        body: formData
       });
       
-      if (!uploadResponse.ok) {
-        throw new Error(`Upload failed: ${uploadResponse.status} ${uploadResponse.statusText}`);
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
       }
 
       let uploadData;
       try {
-        uploadData = await uploadResponse.json();
+        uploadData = await response.json();
       } catch (e) {
         console.error('Failed to parse upload response:', e);
         throw new Error('Server returned invalid JSON response');
