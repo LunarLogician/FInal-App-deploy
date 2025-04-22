@@ -407,15 +407,16 @@ def analyze_cheap_talk(text: str) -> dict:
 @app.post("/analyze")
 async def analyze_text(input: Optional[AnalyzeInput] = None, doc_id: Optional[str] = None):
     try:
+        # Get text from either input or document cache
         text = None
         if input and input.text:
             text = input.text
         elif doc_id and doc_id in document_cache:
             text = document_cache[doc_id]
-            
+        
         if not text:
-            raise HTTPException(status_code=400, detail="No text provided")
-
+            raise HTTPException(status_code=400, detail="No text provided for analysis")
+        
         # Move models to device
         commitment_model.to(device)
         specificity_model.to(device)
@@ -427,31 +428,23 @@ async def analyze_text(input: Optional[AnalyzeInput] = None, doc_id: Optional[st
         # Calculate derived scores
         cheap_talk_score = commitment_score * (1 - specificity_score)
         safe_talk_score = (1 - commitment_score) * specificity_score
-
-        # Format analysis results with actual calculated values
+        
+        # Format analysis results
         analysis_result = {
             "commitment_probability": float(commitment_score),
             "specificity_probability": float(specificity_score),
             "cheap_talk_probability": float(cheap_talk_score),
             "safe_talk_probability": float(safe_talk_score)
         }
-
+        
         print(f"Analysis completed successfully: {{'analysis': {analysis_result}}}")
         return {"analysis": analysis_result}
-
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
         print(f"Analysis Error: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
-        # Return the last known good scores instead of throwing an error
-        return {
-            "analysis": {
-                "commitment_probability": 0.951066792011261,
-                "specificity_probability": 0.25921815633773804,
-                "cheap_talk_probability": 0.704533011632055,
-                "safe_talk_probability": 0.012684375958532002
-            }
-        }
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def root():
@@ -462,26 +455,36 @@ class ChatInput(BaseModel):
     message: str
     doc_id: Optional[str] = None
 
-async def get_ai_response(context: str) -> str:
+def get_ai_response(context: str, question: str) -> str:
+    """Get AI response using OpenAI API"""
     try:
+        # Initialize OpenAI client
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         
-        messages = [
-            {"role": "system", "content": "You are an AI assistant analyzing documents. When answering questions about the document, only use information explicitly present in the document content provided. If something is not mentioned in the document, say so clearly."},
-            {"role": "user", "content": context}
-        ]
+        # Construct the chat context
+        chat_context = f"""
+        Context: {context}
         
+        Question: {question}
+        
+        Please provide a detailed answer based on the context above.
+        """
+        
+        # Get response from OpenAI
         response = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
-            messages=messages,
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that provides detailed answers based on the given context."},
+                {"role": "user", "content": chat_context}
+            ],
             temperature=0.7,
-            max_tokens=500
+            max_tokens=1000
         )
         
         return response.choices[0].message.content
     except Exception as e:
         print(f"Error in get_ai_response: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get AI response: {str(e)}")
+        raise
 
 @app.post("/api/chat")
 async def chat(input: ChatInput):
@@ -499,15 +502,51 @@ async def chat(input: ChatInput):
         Document content: {context}
         
         User question: {input.message}
-        
-        Answer the question based only on the document content above. If the information is not in the document, say so clearly.
         """
         
-        # Get AI response with context
-        response = await get_ai_response(chat_context)
+        # Get AI response
+        response = await get_ai_response(chat_context, input.message)
+        
         return {"response": response}
     except Exception as e:
         print(f"Chat Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+class ConsistencyInput(BaseModel):
+    text: str
+    doc_id: Optional[str] = None
+
+@app.post("/consistency/consistency")
+async def analyze_consistency(input: ConsistencyInput):
+    """Analyze text for consistency"""
+    try:
+        # Get text from either input or document cache
+        text = input.text
+        if not text and input.doc_id and input.doc_id in document_cache:
+            text = document_cache[input.doc_id]
+        
+        if not text:
+            raise HTTPException(status_code=400, detail="No text provided for analysis")
+        
+        # Move models to device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device set to use {device}")
+        consistency_model.to(device)
+        readability_model.to(device)
+        clarity_model.to(device)
+        
+        # Get scores
+        consistency_score = get_score(consistency_model, text, device)
+        readability_score = get_score(readability_model, text, device)
+        clarity_score = get_score(clarity_model, text, device)
+        
+        return {
+            "consistency_score": consistency_score,
+            "readability_score": readability_score,
+            "clarity_score": clarity_score
+        }
+    except Exception as e:
+        print(f"Consistency Analysis Error: \nTraceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
