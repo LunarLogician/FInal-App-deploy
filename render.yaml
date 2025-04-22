@@ -68,4 +68,18 @@ services:
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: OPENAI_API_KEY
-        sync: false 
+        sync: false
+
+  # Final App Deploy
+  - type: web
+    name: final-app-deploy
+    env: python
+    buildCommand: pip install -r requirements.txt && python -m nltk.downloader punkt
+    startCommand: gunicorn main:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.9.0 
