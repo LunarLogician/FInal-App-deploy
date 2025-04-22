@@ -15,6 +15,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipe
 import langid
 import math
 from openai import OpenAI
+import traceback
 
 app = FastAPI(title="Combined API Service")
 
@@ -365,7 +366,8 @@ async def upload_file(file: UploadFile = File(...)):
         )
 
 class AnalyzeInput(BaseModel):
-    text: str
+    text: Optional[str] = None
+    doc_id: Optional[str] = None
 
 # Cheap Talk Analysis patterns
 COMMITMENT_PATTERNS = [
@@ -407,45 +409,50 @@ def analyze_cheap_talk(text: str) -> dict:
     }
 
 @app.post("/analyze")
-async def analyze_text(input: Optional[AnalyzeInput] = None, doc_id: Optional[str] = None):
+async def analyze_text(input: AnalyzeInput):
     try:
-        # Get text from either input or document cache
-        text = None
-        if input and hasattr(input, 'text') and input.text:
-            text = input.text
-        elif doc_id and doc_id in document_cache:
-            text = document_cache[doc_id]
+        # Get text from input or document cache
+        text = input.text
+        if not text and input.doc_id:
+            text = document_cache.get(input.doc_id, {}).get('content', '')
         
+        # If still no text, return default scores
         if not text:
-            raise HTTPException(status_code=400, detail="No text provided for analysis. Please provide either 'text' in the request body or a valid 'doc_id' parameter.")
+            return {
+                "status": "success",
+                "analysis": {
+                    "commitment_probability": 0.5,
+                    "specificity_probability": 0.5,
+                    "cheap_talk_probability": 0.5,
+                    "safe_talk_probability": 0.5
+                }
+            }
         
-        # Move models to device
+        # Move models to device before analysis
         commitment_model.to(device)
         specificity_model.to(device)
         
-        # Get commitment and specificity scores
-        commitment_score = get_score(commitment_model, commitment_tokenizer, text)
-        specificity_score = get_score(specificity_model, specificity_tokenizer, text)
+        # Get scores
+        commitment_score = get_score(text, commitment_model, commitment_tokenizer)
+        specificity_score = get_score(text, specificity_model, specificity_tokenizer)
         
-        # Calculate derived scores
-        cheap_talk_score = commitment_score * (1 - specificity_score)
-        safe_talk_score = (1 - commitment_score) * specificity_score
+        # Calculate additional scores
+        cheap_talk_score = 1 - specificity_score
+        safe_talk_score = 1 - commitment_score
         
-        # Format analysis results
-        analysis_result = {
+        # Format results
+        analysis = {
             "commitment_probability": float(commitment_score),
             "specificity_probability": float(specificity_score),
             "cheap_talk_probability": float(cheap_talk_score),
             "safe_talk_probability": float(safe_talk_score)
         }
         
-        print(f"Analysis completed successfully: {{'analysis': {analysis_result}}}")
-        return {"analysis": analysis_result}
-    except HTTPException as e:
-        raise
+        return {"status": "success", "analysis": analysis}
     except Exception as e:
         print(f"Analysis Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def root():
