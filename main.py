@@ -409,13 +409,13 @@ async def analyze_text(input: Optional[AnalyzeInput] = None, doc_id: Optional[st
     try:
         # Get text from either input or document cache
         text = None
-        if input and input.text:
+        if input and hasattr(input, 'text') and input.text:
             text = input.text
         elif doc_id and doc_id in document_cache:
             text = document_cache[doc_id]
         
         if not text:
-            raise HTTPException(status_code=400, detail="No text provided for analysis")
+            raise HTTPException(status_code=400, detail="No text provided for analysis. Please provide either 'text' in the request body or a valid 'doc_id' parameter.")
         
         # Move models to device
         commitment_model.to(device)
@@ -439,12 +439,11 @@ async def analyze_text(input: Optional[AnalyzeInput] = None, doc_id: Optional[st
         
         print(f"Analysis completed successfully: {{'analysis': {analysis_result}}}")
         return {"analysis": analysis_result}
-    except HTTPException:
+    except HTTPException as e:
         raise
     except Exception as e:
         print(f"Analysis Error: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
 
 @app.get("/")
 async def root():
@@ -459,7 +458,11 @@ def get_ai_response(context: str, question: str) -> str:
     """Get AI response using OpenAI API"""
     try:
         # Initialize OpenAI client
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI API key not found in environment variables")
+            
+        client = OpenAI()  # OpenAI client will automatically use OPENAI_API_KEY from env
         
         # Construct the chat context
         chat_context = f"""
@@ -481,18 +484,26 @@ def get_ai_response(context: str, question: str) -> str:
             max_tokens=1000
         )
         
+        if not response.choices or not response.choices[0].message:
+            raise ValueError("No response received from OpenAI API")
+            
         return response.choices[0].message.content
     except Exception as e:
         print(f"Error in get_ai_response: {str(e)}")
-        raise
+        raise HTTPException(status_code=500, detail=f"Error getting AI response: {str(e)}")
 
 @app.post("/api/chat")
 async def chat(input: ChatInput):
     try:
+        if not input.message:
+            raise HTTPException(status_code=400, detail="Message cannot be empty")
+            
         # Get document context if available
         context = ""
         doc_name = ""
-        if input.doc_id and input.doc_id in document_cache:
+        if input.doc_id:
+            if input.doc_id not in document_cache:
+                raise HTTPException(status_code=404, detail=f"Document with ID {input.doc_id} not found")
             context = document_cache[input.doc_id]
             doc_name = input.doc_id
         
@@ -508,6 +519,9 @@ async def chat(input: ChatInput):
         response = await get_ai_response(chat_context, input.message)
         
         return {"response": response}
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         print(f"Chat Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
