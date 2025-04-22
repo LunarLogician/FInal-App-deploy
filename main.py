@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRouter
 from analyze.consistency import router as consistency_router
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 import os
 import shutil
 from pydantic import BaseModel, ValidationError
@@ -16,6 +16,9 @@ import langid
 import math
 from openai import OpenAI
 import traceback
+import textstat
+import numpy as np
+import uuid
 
 app = FastAPI(title="Combined API Service")
 
@@ -63,6 +66,54 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+# Model definitions
+class ConsistencyInput(BaseModel):
+    text: Optional[str] = None
+    doc_id: Optional[str] = None
+
+# Create router for consistency endpoints
+consistency_router = APIRouter()
+
+@consistency_router.post("/consistency")
+async def analyze_consistency(input: ConsistencyInput):
+    try:
+        # Get text from input or document cache
+        text = input.text or ""
+        if not text and input.doc_id:
+            text = document_cache.get(input.doc_id, '')
+        
+        if not text:
+            return {
+                "status": "success",
+                "analysis": {
+                    "consistency_score": 0.5,
+                    "readability_score": 0.5,
+                    "clarity_score": 0.5
+                }
+            }
+        
+        # Calculate readability score
+        readability_score = calculate_readability(text)
+        
+        # Calculate clarity score
+        clarity_score = calculate_clarity(text)
+        
+        # Calculate consistency score as average of readability and clarity
+        consistency_score = (readability_score + clarity_score) / 2.0
+        
+        return {
+            "status": "success",
+            "analysis": {
+                "consistency_score": consistency_score,
+                "readability_score": readability_score,
+                "clarity_score": clarity_score
+            }
+        }
+    except Exception as e:
+        print(f"Consistency Analysis Error: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Include the consistency router
 app.include_router(consistency_router, prefix="/consistency", tags=["consistency"])
 
@@ -103,6 +154,15 @@ def is_english(text: str) -> bool:
 
 def get_score(model, tokenizer, text: str) -> float:
     try:
+        # Input validation
+        if not isinstance(text, str):
+            print(f"Invalid text type: {type(text)}")
+            return 0.5
+        
+        if not text.strip():
+            print("Empty text provided")
+            return 0.5
+        
         # Move model to device
         model.to(device)
         
@@ -120,12 +180,13 @@ def get_score(model, tokenizer, text: str) -> float:
             # Ensure score is a valid float between 0 and 1
             if not isinstance(score, float) or math.isnan(score):
                 print(f"Invalid score generated: {score}")
-                return 0.951066792011261  # Return default score instead of 0
+                return 0.5
             return max(0.0, min(1.0, score))
             
     except Exception as e:
         print(f"Error in get_score: {str(e)}")
-        return 0.951066792011261  # Return default score instead of raising error
+        print(f"Traceback: {traceback.format_exc()}")
+        return 0.5  # Return default score instead of raising error
 
 class ESGInput(BaseModel):
     text: str
@@ -366,7 +427,7 @@ async def upload_file(file: UploadFile = File(...)):
         )
 
 class AnalyzeInput(BaseModel):
-    text: Optional[str] = None
+    text: str
     doc_id: Optional[str] = None
 
 # Cheap Talk Analysis patterns
@@ -414,7 +475,7 @@ async def analyze_text(input: AnalyzeInput):
         # Get text from input or document cache
         text = input.text
         if not text and input.doc_id:
-            text = document_cache.get(input.doc_id, {}).get('content', '')
+            text = document_cache.get(input.doc_id, '')
         
         # If still no text, return default scores
         if not text:
@@ -433,12 +494,12 @@ async def analyze_text(input: AnalyzeInput):
         specificity_model.to(device)
         
         # Get scores
-        commitment_score = get_score(text, commitment_model, commitment_tokenizer)
-        specificity_score = get_score(text, specificity_model, specificity_tokenizer)
+        commitment_score = get_score(commitment_model, commitment_tokenizer, text)
+        specificity_score = get_score(specificity_model, specificity_tokenizer, text)
         
         # Calculate additional scores
-        cheap_talk_score = 1 - specificity_score
-        safe_talk_score = 1 - commitment_score
+        cheap_talk_score = commitment_score * (1 - specificity_score)
+        safe_talk_score = (1 - commitment_score) * specificity_score
         
         # Format results
         analysis = {
@@ -463,114 +524,89 @@ class ChatInput(BaseModel):
     message: str
     doc_id: Optional[str] = None
 
+@app.post("/api/chat")
+async def chat(input: ChatInput):
+    try:
+        # Get document context if doc_id is provided
+        context = ""
+        if input.doc_id:
+            doc_content = document_cache.get(input.doc_id, '')
+            if doc_content:
+                context = f"Document Content: {doc_content}\n\n"
+        
+        # Get AI response
+        response = get_ai_response(context, input.message)
+        
+        return {"status": "success", "response": response}
+    except Exception as e:
+        print(f"Chat Error: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 def get_ai_response(context: str, question: str) -> str:
     """Get AI response using OpenAI API"""
     try:
-        # Initialize OpenAI client
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OpenAI API key not found in environment variables")
-            
-        client = OpenAI()  # OpenAI client will automatically use OPENAI_API_KEY from env
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         
-        # Construct the chat context
-        chat_context = f"""
-        Context: {context}
+        # Construct the prompt
+        prompt = f"""Context: {context}
         
-        Question: {question}
-        
-        Please provide a detailed answer based on the context above.
-        """
+Question: {question}
+
+Please provide a detailed answer based on the context above."""
         
         # Get response from OpenAI
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that provides detailed answers based on the given context."},
-                {"role": "user", "content": chat_context}
+                {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=500
         )
         
-        if not response.choices or not response.choices[0].message:
-            raise ValueError("No response received from OpenAI API")
-            
         return response.choices[0].message.content
     except Exception as e:
         print(f"Error in get_ai_response: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting AI response: {str(e)}")
-
-@app.post("/api/chat")
-async def chat(input: ChatInput):
-    try:
-        if not input.message:
-            raise HTTPException(status_code=400, detail="Message cannot be empty")
-            
-        # Get document context if available
-        context = ""
-        doc_name = ""
-        if input.doc_id:
-            if input.doc_id not in document_cache:
-                raise HTTPException(status_code=404, detail=f"Document with ID {input.doc_id} not found")
-            context = document_cache[input.doc_id]
-            doc_name = input.doc_id
-        
-        # Create chat context with document name
-        chat_context = f"""
-        Document name: {doc_name}
-        Document content: {context}
-        
-        User question: {input.message}
-        """
-        
-        # Get AI response
-        response = await get_ai_response(chat_context, input.message)
-        
-        return {"response": response}
-    except HTTPException as e:
-        # Re-raise HTTP exceptions
         raise
-    except Exception as e:
-        print(f"Chat Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
-class ConsistencyInput(BaseModel):
-    text: str
-    doc_id: Optional[str] = None
-
-@app.post("/consistency/consistency")
-async def analyze_consistency(input: ConsistencyInput):
-    """Analyze text for consistency"""
+def calculate_readability(text: str) -> float:
+    """Calculate readability score using Flesch Reading Ease"""
     try:
-        # Get text from either input or document cache
-        text = input.text
-        if not text and input.doc_id and input.doc_id in document_cache:
-            text = document_cache[input.doc_id]
+        # Calculate Flesch Reading Ease score
+        raw_score = textstat.flesch_reading_ease(text)
+        print(f"Raw Flesch score: {raw_score}")
         
-        if not text:
-            raise HTTPException(status_code=400, detail="No text provided for analysis")
+        # Normalize score to 0-1 range
+        normalized_score = raw_score / 100.0
+        print(f"Normalized readability: {normalized_score}")
         
-        # Move models to device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Device set to use {device}")
-        consistency_model.to(device)
-        readability_model.to(device)
-        clarity_model.to(device)
-        
-        # Get scores
-        consistency_score = get_score(consistency_model, text, device)
-        readability_score = get_score(readability_model, text, device)
-        clarity_score = get_score(clarity_model, text, device)
-        
-        return {
-            "consistency_score": consistency_score,
-            "readability_score": readability_score,
-            "clarity_score": clarity_score
-        }
+        return normalized_score
     except Exception as e:
-        print(f"Consistency Analysis Error: \nTraceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error calculating readability: {str(e)}")
+        return 0.5
+
+def calculate_clarity(text: str) -> float:
+    """Calculate clarity score using CTTR (Carroll's Type-Token Ratio)"""
+    try:
+        # Tokenize text
+        words = text.lower().split()
+        total_words = len(words)
+        unique_words = len(set(words))
+        
+        # Calculate CTTR
+        cttr = unique_words / math.sqrt(2 * total_words)
+        print(f"CTTR raw: {cttr} | Total: {total_words} | Unique: {unique_words}")
+        
+        # Normalize score (assuming max CTTR of 25 for typical text)
+        normalized_score = min(cttr / 25.0, 1.0)
+        print(f"Normalized clarity: {normalized_score}")
+        
+        return normalized_score
+    except Exception as e:
+        print(f"Error calculating clarity: {str(e)}")
+        return 0.5
 
 if __name__ == "__main__":
     import uvicorn

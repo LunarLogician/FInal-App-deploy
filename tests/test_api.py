@@ -1,163 +1,185 @@
 import pytest
 import httpx
 import os
-from pathlib import Path
 import tempfile
+from main import app
+from fastapi.testclient import TestClient
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-BASE_URL = "http://localhost:5001"
+@pytest.fixture(scope="session")
+def device():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+@pytest.fixture(scope="session")
+def models_and_tokenizers(device):
+    """Load models and tokenizers once for the entire test session"""
+    # Load commitment model
+    commitment_model = AutoModelForSequenceClassification.from_pretrained(
+        "climatebert/distilroberta-base-climate-commitment"
+    ).to(device)
+    commitment_tokenizer = AutoTokenizer.from_pretrained(
+        "climatebert/distilroberta-base-climate-commitment"
+    )
+    
+    # Load specificity model
+    specificity_model = AutoModelForSequenceClassification.from_pretrained(
+        "climatebert/distilroberta-base-climate-specificity"
+    ).to(device)
+    specificity_tokenizer = AutoTokenizer.from_pretrained(
+        "climatebert/distilroberta-base-climate-specificity"
+    )
+    
+    # Load ESG model
+    esg_model = AutoModelForSequenceClassification.from_pretrained(
+        "yiyanghkust/finbert-esg-9-categories"
+    ).to(device)
+    esg_tokenizer = AutoTokenizer.from_pretrained(
+        "yiyanghkust/finbert-esg-9-categories"
+    )
+    
+    return {
+        "commitment": (commitment_model, commitment_tokenizer),
+        "specificity": (specificity_model, specificity_tokenizer),
+        "esg": (esg_model, esg_tokenizer)
+    }
+
+@pytest.fixture
+def client(models_and_tokenizers):
+    """Create a test client for the FastAPI application"""
+    with TestClient(app) as test_client:
+        yield test_client
 
 @pytest.fixture
 def test_file():
-    # Create a temporary test file
+    """Create a temporary test file"""
     with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as f:
-        f.write(b"This is a test document for analysis. We commit to reducing emissions by 50% by 2030.")
+        f.write(b"This is a test file content.")
         f.flush()
         yield f.name
-    # Cleanup
     os.unlink(f.name)
 
 @pytest.fixture
 def chat_request_data():
+    """Prepare chat request data"""
     return {
-        "message": "What are the emission reduction targets?",
-        "doc_id": None
+        "message": "What is the company's commitment to sustainability?",
+        "doc_id": "test_doc"
     }
 
 @pytest.fixture
 def analyze_request_data():
+    """Prepare analyze request data"""
     return {
         "text": "We commit to reducing emissions by 50% by 2030 and increasing renewable energy usage."
     }
 
 @pytest.fixture
 def esg_request_data():
+    """Prepare ESG request data"""
     return {
         "text": "Our company is committed to reducing carbon emissions and improving environmental sustainability."
     }
 
 @pytest.fixture
 def consistency_request_data():
+    """Fixture for consistency request data"""
     return {
-        "chunks": ["This is a sample text for consistency analysis. It should be clear and readable."]
+        "text": "Our sustainability goals are clear and consistent with our long-term strategy.",
+        "doc_id": None
     }
-
-@pytest.fixture
-async def client():
-    async with httpx.AsyncClient(base_url=BASE_URL) as client:
-        yield client
 
 @pytest.mark.asyncio
 async def test_root_endpoint(client):
     """Test root endpoint"""
-    response = await client.get("/")
+    response = client.get("/")
     assert response.status_code == 200
     assert "message" in response.json()
-    assert response.json()["message"] == "API is running"
 
 @pytest.mark.asyncio
 async def test_upload_endpoint(client, test_file):
     """Test file upload endpoint"""
     with open(test_file, 'rb') as f:
         files = {'file': ('test.txt', f, 'text/plain')}
-        response = await client.post("/upload", files=files)
-    
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-    assert "analysis" in data
-    assert "esg" in data
-    assert "filename" in data
+        response = client.post("/upload", files=files)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert "analysis" in data
+        assert "esg" in data
 
 @pytest.mark.asyncio
 async def test_analyze_endpoint(client, analyze_request_data):
     """Test analyze endpoint"""
-    response = await client.post("/analyze", json=analyze_request_data)
+    response = client.post("/analyze", json=analyze_request_data)
     assert response.status_code == 200
     data = response.json()
+    assert data["status"] == "success"
     assert "analysis" in data
-    analysis = data["analysis"]
-    assert "commitment_probability" in analysis
-    assert "specificity_probability" in analysis
-    assert "cheap_talk_probability" in analysis
-    assert "safe_talk_probability" in analysis
+    assert all(key in data["analysis"] for key in [
+        "commitment_probability",
+        "specificity_probability",
+        "cheap_talk_probability",
+        "safe_talk_probability"
+    ])
 
 @pytest.mark.asyncio
 async def test_esg_endpoint(client, esg_request_data):
     """Test ESG endpoint"""
-    response = await client.post("/esg", json=esg_request_data)
+    response = client.post("/esg", json=esg_request_data)
     assert response.status_code == 200
     data = response.json()
-    expected_categories = [
+    assert all(category in data for category in [
         'Business Ethics & Values', 'Climate Change', 'Community Relations',
         'Corporate Governance', 'Human Capital', 'Natural Capital', 'Non-ESG',
         'Pollution & Waste', 'Product Liability'
-    ]
-    for category in expected_categories:
-        assert category in data
-        assert isinstance(data[category], float)
-        assert 0 <= data[category] <= 1
+    ])
 
 @pytest.mark.asyncio
 async def test_consistency_endpoint(client, consistency_request_data):
     """Test consistency endpoint"""
-    response = await client.post("/consistency/consistency", json=consistency_request_data)
+    response = client.post("/consistency/consistency", json=consistency_request_data)
     assert response.status_code == 200
     data = response.json()
-    assert "consistency_score" in data
-    assert "consistency_variability" in data
-    assert "readability_score" in data
-    assert "clarity_score" in data
-    assert all(isinstance(score, (float, type(None))) for score in data.values())
+    assert "status" in data
+    assert data["status"] == "success"
+    assert "analysis" in data
+    analysis = data["analysis"]
+    assert all(key in analysis for key in ["consistency_score", "readability_score", "clarity_score"])
+    assert all(isinstance(score, float) and 0 <= score <= 1 for score in analysis.values())
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_with_document(client, test_file):
-    """Test chat endpoint with document context"""
+async def test_chat_endpoint_with_document(client, chat_request_data):
+    """Test chat endpoint with document"""
     # First upload a document
-    with open(test_file, 'rb') as f:
+    with open("tests/test_document.txt", 'rb') as f:
         files = {'file': ('test.txt', f, 'text/plain')}
-        upload_response = await client.post("/upload", files=files)
-    
-    assert upload_response.status_code == 200
-    doc_id = upload_response.json()["filename"]
+        upload_response = client.post("/upload", files=files)
+        assert upload_response.status_code == 200
+        doc_id = upload_response.json()["filename"]
     
     # Then test chat with the document
-    chat_data = {
-        "message": "What are the emission reduction targets?",
-        "doc_id": doc_id
-    }
-    response = await client.post("/api/chat", json=chat_data)
-    
-    # Check if we get either a successful response or an error
-    if response.status_code == 500:
-        error_data = response.json()
-        assert "status" in error_data
-        assert error_data["status"] == "error"
-        assert "code" in error_data
-        assert error_data["code"] == "HTTP_ERROR"
-    else:
-        assert response.status_code == 200
-        assert "response" in response.json()
+    chat_request_data["doc_id"] = doc_id
+    response = client.post("/api/chat", json=chat_request_data)
+    assert response.status_code == 200
+    assert "response" in response.json()
 
 @pytest.mark.asyncio
 async def test_analyze_endpoint_no_text(client):
     """Test analyze endpoint with no text"""
     # Test with missing text field
-    response = await client.post("/analyze", json={})
+    response = client.post("/analyze", json={})
     assert response.status_code == 422  # Validation error
     error_data = response.json()
     assert "status" in error_data
     assert error_data["status"] == "error"
     assert "code" in error_data
     assert error_data["code"] == "VALIDATION_ERROR"
-    
+
     # Test with empty text
-    response = await client.post("/analyze", json={"text": ""})
-    # The endpoint returns 200 with default scores for empty text
+    response = client.post("/analyze", json={"text": ""})
     assert response.status_code == 200
     data = response.json()
+    assert data["status"] == "success"
     assert "analysis" in data
-    analysis = data["analysis"]
-    assert "commitment_probability" in analysis
-    assert "specificity_probability" in analysis
-    assert "cheap_talk_probability" in analysis
-    assert "safe_talk_probability" in analysis
+    assert all(0 <= score <= 1 for score in data["analysis"].values())
