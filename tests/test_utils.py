@@ -1,5 +1,5 @@
 import pytest
-from main import is_english, get_score
+from utils import is_english, get_score
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 @pytest.fixture
@@ -21,16 +21,16 @@ def test_get_score(model_and_tokenizer):
     model, tokenizer = model_and_tokenizer
     text = "This is a test text for scoring."
     
-    score = get_score(model, tokenizer, text)
+    score = get_score(text, model, tokenizer)
     assert isinstance(score, float)
     assert 0 <= score <= 1
 
 def test_get_score_empty_text(model_and_tokenizer):
     model, tokenizer = model_and_tokenizer
     with pytest.raises(ValueError):
-        get_score(model, tokenizer, "")
+        get_score("", model, tokenizer)
 
 def test_get_score_invalid_text(model_and_tokenizer):
     model, tokenizer = model_and_tokenizer
     with pytest.raises(Exception):
-        get_score(model, tokenizer, None) 
+        get_score(None, model, tokenizer) 
