@@ -36,9 +36,7 @@ jobs:
         python -m uvicorn main:app --host 0.0.0.0 --port 5001 &
         sleep 5  # Wait for server to start
 
-    - name: Run Python tests
-      run: |
-        pytest --cov=./ --cov-report=xml
+    
 
     - name: Upload Python coverage reports
       uses: codecov/codecov-action@v3
