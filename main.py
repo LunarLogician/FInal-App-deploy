@@ -95,6 +95,8 @@ print("Models loaded.")
 document_cache: Dict[str, str] = {}
 
 def is_english(text: str) -> bool:
+    if not text or not isinstance(text, str):
+        return False
     lang, _ = langid.classify(text)
     return lang == "en"
 
