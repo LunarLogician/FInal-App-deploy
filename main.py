@@ -612,4 +612,5 @@ if __name__ == "__main__":
     import uvicorn
     # Create uploads directory if it doesn't exist
     os.makedirs("uploads", exist_ok=True)
-    uvicorn.run(app, host="0.0.0.0", port=5001)
+    port = int(os.getenv("PORT", 5001))
+    uvicorn.run(app, host="0.0.0.0", port=port)
