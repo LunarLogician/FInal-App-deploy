@@ -2,10 +2,11 @@ import pytest
 import httpx
 import os
 import tempfile
-from main import app
+from main import app, get_ai_response, analyze_cheap_talk
 from fastapi.testclient import TestClient
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from httpx import AsyncClient
 
 @pytest.fixture(scope="session")
 def device():
@@ -45,7 +46,7 @@ def models_and_tokenizers(device):
     }
 
 @pytest.fixture
-def client(models_and_tokenizers):
+def client():
     """Create a test client for the FastAPI application"""
     with TestClient(app) as test_client:
         yield test_client
@@ -53,8 +54,9 @@ def client(models_and_tokenizers):
 @pytest.fixture
 def test_file():
     """Create a temporary test file"""
-    with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as f:
-        f.write(b"This is a test file content.")
+    content = "We commit to reducing emissions by 50% by 2030 and increasing renewable energy usage."
+    with tempfile.NamedTemporaryFile(suffix='.txt', mode='w', delete=False) as f:
+        f.write(content)
         f.flush()
         yield f.name
     os.unlink(f.name)
@@ -69,9 +71,9 @@ def chat_request_data():
 
 @pytest.fixture
 def analyze_request_data():
-    """Prepare analyze request data"""
     return {
-        "text": "We commit to reducing emissions by 50% by 2030 and increasing renewable energy usage."
+        "text": "This is a sample text for analysis",
+        "doc_id": None
     }
 
 @pytest.fixture
@@ -83,48 +85,58 @@ def esg_request_data():
 
 @pytest.fixture
 def consistency_request_data():
-    """Fixture for consistency request data"""
     return {
-        "text": "Our sustainability goals are clear and consistent with our long-term strategy.",
-        "doc_id": None
+        "chunks": [
+            "This is the first chunk of text.",
+            "This is the second chunk of text.",
+            "This is the third chunk of text."
+        ]
     }
 
-@pytest.mark.asyncio
-async def test_root_endpoint(client):
+@pytest.fixture
+async def async_client():
+    async with AsyncClient(app=app, base_url="http://localhost:5001") as client:
+        yield client
+
+def test_root_endpoint(client):
     """Test root endpoint"""
     response = client.get("/")
     assert response.status_code == 200
     assert "message" in response.json()
 
-@pytest.mark.asyncio
-async def test_upload_endpoint(client, test_file):
+def test_upload_endpoint(client, test_file):
     """Test file upload endpoint"""
     with open(test_file, 'rb') as f:
         files = {'file': ('test.txt', f, 'text/plain')}
         response = client.post("/upload", files=files)
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "success"
+        assert "filename" in data
+        assert "message" in data
         assert "analysis" in data
+        assert isinstance(data["analysis"], dict)
         assert "esg" in data
+        assert isinstance(data["esg"], dict)
 
 @pytest.mark.asyncio
-async def test_analyze_endpoint(client, analyze_request_data):
-    """Test analyze endpoint"""
-    response = client.post("/analyze", json=analyze_request_data)
+async def test_analyze_endpoint(async_client, analyze_request_data):
+    response = await async_client.post("/analyze", json=analyze_request_data)
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "success"
-    assert "analysis" in data
-    assert all(key in data["analysis"] for key in [
-        "commitment_probability",
-        "specificity_probability",
-        "cheap_talk_probability",
-        "safe_talk_probability"
-    ])
+    assert "commitment_score" in data
+    assert "specificity_score" in data
+    assert "cheap_talk_score" in data
+    assert "safe_talk_score" in data
+    assert isinstance(data["commitment_score"], float)
+    assert isinstance(data["specificity_score"], float)
+    assert isinstance(data["cheap_talk_score"], float)
+    assert isinstance(data["safe_talk_score"], float)
+    assert 0 <= data["commitment_score"] <= 1
+    assert 0 <= data["specificity_score"] <= 1
+    assert 0 <= data["cheap_talk_score"] <= 1
+    assert 0 <= data["safe_talk_score"] <= 1
 
-@pytest.mark.asyncio
-async def test_esg_endpoint(client, esg_request_data):
+def test_esg_endpoint(client, esg_request_data):
     """Test ESG endpoint"""
     response = client.post("/esg", json=esg_request_data)
     assert response.status_code == 200
@@ -137,21 +149,38 @@ async def test_esg_endpoint(client, esg_request_data):
     assert all(isinstance(score, float) and 0 <= score <= 1 for score in data.values())
 
 @pytest.mark.asyncio
-async def test_consistency_endpoint(client, consistency_request_data):
-    """Test consistency endpoint"""
-    response = client.post("/consistency/consistency", json=consistency_request_data)
+async def test_consistency_endpoint(async_client, consistency_request_data):
+    response = await async_client.post("/consistency", json=consistency_request_data)
     assert response.status_code == 200
     data = response.json()
-    assert "status" in data
-    assert data["status"] == "success"
-    assert "analysis" in data
-    analysis = data["analysis"]
-    assert all(key in analysis for key in ["consistency_score", "readability_score", "clarity_score"])
-    assert all(isinstance(score, float) and 0 <= score <= 1 for score in analysis.values())
+    assert "consistency_score" in data
+    assert isinstance(data["consistency_score"], float)
+    assert 0 <= data["consistency_score"] <= 1
 
 @pytest.mark.asyncio
-async def test_analyze_endpoint_no_text(client):
-    """Test analyze endpoint with no text"""
-    # Test with missing text field
-    response = client.post("/analyze", json={})
-    assert response.status_code == 422  # Validation error
+async def test_consistency_endpoint_no_text(async_client):
+    response = await async_client.post("/consistency", json={"chunks": []})
+    assert response.status_code == 400
+    data = response.json()
+    assert "detail" in data
+    assert "No text chunks provided for analysis" in data["detail"]
+
+@pytest.mark.asyncio
+async def test_analyze_endpoint_no_text(async_client):
+    response = await async_client.post("/analyze", json={"text": "", "doc_id": None})
+    assert response.status_code == 400
+    data = response.json()
+    assert "detail" in data
+    assert "No text provided for analysis" in data["detail"]
+
+def test_analyze_cheap_talk():
+    """Test analyze_cheap_talk function directly"""
+    test_text = "We commit to reducing emissions by 50% by 2030 and increasing renewable energy usage."
+    result = analyze_cheap_talk(test_text)
+    assert all(key in result for key in [
+        "commitment_probability",
+        "specificity_probability",
+        "cheap_talk_probability",
+        "safe_talk_probability"
+    ])
+    assert all(isinstance(score, float) and 0 <= score <= 1 for score in result.values())

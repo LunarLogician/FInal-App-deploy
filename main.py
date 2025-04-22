@@ -72,29 +72,22 @@ app.add_middleware(
 
 # Model definitions
 class ConsistencyInput(BaseModel):
-    text: Optional[str] = None
-    doc_id: Optional[str] = None
+    chunks: list[str]
 
 # Create router for consistency endpoints
 consistency_router = APIRouter()
 
-@consistency_router.post("/consistency")
+@consistency_router.post("/")
 async def analyze_consistency(input: ConsistencyInput):
     try:
-        # Get text from input or document cache
-        text = input.text or ""
-        if not text and input.doc_id:
-            text = document_cache.get(input.doc_id, '')
+        if not input.chunks or not any(chunk.strip() for chunk in input.chunks):
+            raise HTTPException(
+                status_code=400,
+                detail="No text provided for analysis"
+            )
         
-        if not text:
-            return {
-                "status": "success",
-                "analysis": {
-                    "consistency_score": 0.5,
-                    "readability_score": 0.5,
-                    "clarity_score": 0.5
-                }
-            }
+        # Join chunks for analysis
+        text = " ".join(input.chunks)
         
         # Calculate readability score
         readability_score = calculate_readability(text)
@@ -107,12 +100,10 @@ async def analyze_consistency(input: ConsistencyInput):
         
         return {
             "status": "success",
-            "analysis": {
-                "consistency_score": consistency_score,
-                "readability_score": readability_score,
-                "clarity_score": clarity_score
-            }
+            "consistency_score": float(consistency_score)
         }
+    except HTTPException as he:
+        raise he
     except Exception as e:
         print(f"Consistency Analysis Error: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
@@ -127,45 +118,62 @@ print("Loading models...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Device set to use {device}")
 
-commitment_model = AutoModelForSequenceClassification.from_pretrained(
-    "climatebert/distilroberta-base-climate-commitment"
-).to(device)
-specificity_model = AutoModelForSequenceClassification.from_pretrained(
-    "climatebert/distilroberta-base-climate-specificity"
-).to(device)
+# Global variables for lazy loading
+commitment_model = None
+specificity_model = None
+esg_model = None
+commitment_tokenizer = None
+specificity_tokenizer = None
+esg_tokenizer = None
 
-commitment_tokenizer = AutoTokenizer.from_pretrained(
-    "climatebert/distilroberta-base-climate-commitment"
-)
-specificity_tokenizer = AutoTokenizer.from_pretrained(
-    "climatebert/distilroberta-base-climate-specificity"
-)
-
-# FinBERT ESG model
-model_name = "yiyanghkust/finbert-esg-9-categories"
-esg_tokenizer = AutoTokenizer.from_pretrained(model_name)
-esg_model = AutoModelForSequenceClassification.from_pretrained(model_name).to(device)
-print("Models loaded.")
-
-# Add document cache
-document_cache: Dict[str, str] = {}
-
-def is_english(text: str) -> bool:
-    if not text or not isinstance(text, str):
-        return False
-    lang, _ = langid.classify(text)
-    return lang == "en"
+def load_models():
+    """Lazy load models only when needed"""
+    global commitment_model, specificity_model, esg_model
+    global commitment_tokenizer, specificity_tokenizer, esg_tokenizer
+    
+    try:
+        if commitment_model is None:
+            print("Loading commitment model...")
+            commitment_model = AutoModelForSequenceClassification.from_pretrained(
+                "climatebert/distilroberta-base-climate-commitment"
+            ).to(device)
+            commitment_tokenizer = AutoTokenizer.from_pretrained(
+                "climatebert/distilroberta-base-climate-commitment"
+            )
+            
+        if specificity_model is None:
+            print("Loading specificity model...")
+            specificity_model = AutoModelForSequenceClassification.from_pretrained(
+                "climatebert/distilroberta-base-climate-specificity"
+            ).to(device)
+            specificity_tokenizer = AutoTokenizer.from_pretrained(
+                "climatebert/distilroberta-base-climate-specificity"
+            )
+            
+        if esg_model is None:
+            print("Loading ESG model...")
+            model_name = "yiyanghkust/finbert-esg-9-categories"
+            esg_tokenizer = AutoTokenizer.from_pretrained(model_name)
+            esg_model = AutoModelForSequenceClassification.from_pretrained(model_name).to(device)
+            
+    except Exception as e:
+        print(f"Error loading models: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load models: {str(e)}"
+        )
 
 def get_score(model, tokenizer, text: str) -> float:
     try:
         # Input validation
         if not isinstance(text, str):
             print(f"Invalid text type: {type(text)}")
-            return 0.5
+            raise ValueError("Invalid text type")
         
         if not text.strip():
             print("Empty text provided")
-            return 0.5
+            raise ValueError("Empty text provided")
         
         # Move model to device
         model.to(device)
@@ -184,13 +192,15 @@ def get_score(model, tokenizer, text: str) -> float:
             # Ensure score is a valid float between 0 and 1
             if not isinstance(score, float) or math.isnan(score):
                 print(f"Invalid score generated: {score}")
-                return 0.5
+                raise ValueError("Invalid score generated")
+                
+            print(f"Generated score: {score}")
             return max(0.0, min(1.0, score))
             
     except Exception as e:
         print(f"Error in get_score: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
-        return 0.5  # Return default score instead of raising error
+        raise ValueError(f"Failed to get score: {str(e)}")
 
 class ESGInput(BaseModel):
     text: str
@@ -253,6 +263,7 @@ async def analyze_esg(input: ESGInput):
         
     except Exception as e:
         print(f"ESG Analysis Error: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
         # Return default scores instead of error
         return {category: 0.0 for category in ESG_CATEGORIES}
 
@@ -477,47 +488,56 @@ def analyze_cheap_talk(text: str) -> dict:
 async def analyze_text(input: AnalyzeInput):
     try:
         # Get text from input or document cache
-        text = input.text
+        text = input.text if input.text else ""
         if not text and input.doc_id:
             text = document_cache.get(input.doc_id, '')
         
-        # If still no text, return default scores
-        if not text:
+        # Validate text is not empty
+        if not text or not text.strip():
+            print("No text provided for analysis")
             return {
-                "status": "success",
-                "analysis": {
-                    "commitment_probability": 0.5,
-                    "specificity_probability": 0.5,
-                    "cheap_talk_probability": 0.5,
-                    "safe_talk_probability": 0.5
-                }
+                "status": "error",
+                "message": "No text provided for analysis"
             }
-        
-        # Move models to device before analysis
+            
+        # Move models to device
         commitment_model.to(device)
         specificity_model.to(device)
         
-        # Get scores
-        commitment_score = get_score(commitment_model, commitment_tokenizer, text)
-        specificity_score = get_score(specificity_model, specificity_tokenizer, text)
-        
-        # Calculate additional scores
-        cheap_talk_score = commitment_score * (1 - specificity_score)
-        safe_talk_score = (1 - commitment_score) * specificity_score
-        
-        # Format results
-        analysis = {
-            "commitment_probability": float(commitment_score),
-            "specificity_probability": float(specificity_score),
-            "cheap_talk_probability": float(cheap_talk_score),
-            "safe_talk_probability": float(safe_talk_score)
-        }
-        
-        return {"status": "success", "analysis": analysis}
+        try:
+            # Get commitment and specificity scores
+            commitment_score = get_score(commitment_model, commitment_tokenizer, text)
+            specificity_score = get_score(specificity_model, specificity_tokenizer, text)
+            
+            # Calculate cheap talk and safe talk scores
+            cheap_talk_score = commitment_score * (1 - specificity_score)
+            safe_talk_score = (1 - commitment_score) * specificity_score
+            
+            # Return response in the format expected by frontend
+            return {
+                "status": "success",
+                "analysis": {
+                    "commitment_probability": float(commitment_score),
+                    "specificity_probability": float(specificity_score),
+                    "cheap_talk_probability": float(cheap_talk_score),
+                    "safe_talk_probability": float(safe_talk_score)
+                }
+            }
+        except Exception as model_error:
+            print(f"Model Error: {str(model_error)}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return {
+                "status": "error",
+                "message": "Error processing text with models"
+            }
+            
     except Exception as e:
         print(f"Analysis Error: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "status": "error",
+            "message": "Failed to analyze text"
+        }
 
 @app.get("/")
 async def root():
@@ -578,39 +598,67 @@ Please provide a detailed answer based on the context above."""
 def calculate_readability(text: str) -> float:
     """Calculate readability score using Flesch Reading Ease"""
     try:
+        if not text:
+            raise ValueError("Empty text provided")
+            
         # Calculate Flesch Reading Ease score
         raw_score = textstat.flesch_reading_ease(text)
         print(f"Raw Flesch score: {raw_score}")
         
-        # Normalize score to 0-1 range
-        normalized_score = raw_score / 100.0
+        # Normalize score to 0-1 range (Flesch scores typically range from 0-100)
+        # Higher scores mean easier to read
+        normalized_score = max(0.0, min(1.0, raw_score / 100.0))
         print(f"Normalized readability: {normalized_score}")
         
         return normalized_score
     except Exception as e:
         print(f"Error calculating readability: {str(e)}")
-        return 0.5
+        raise
 
 def calculate_clarity(text: str) -> float:
-    """Calculate clarity score using CTTR (Carroll's Type-Token Ratio)"""
+    """Calculate clarity score using text complexity metrics"""
     try:
+        if not text:
+            raise ValueError("Empty text provided")
+            
         # Tokenize text
         words = text.lower().split()
         total_words = len(words)
         unique_words = len(set(words))
         
-        # Calculate CTTR
-        cttr = unique_words / math.sqrt(2 * total_words)
-        print(f"CTTR raw: {cttr} | Total: {total_words} | Unique: {unique_words}")
+        if total_words == 0:
+            raise ValueError("No words found in text")
         
-        # Normalize score (assuming max CTTR of 25 for typical text)
-        normalized_score = min(cttr / 25.0, 1.0)
-        print(f"Normalized clarity: {normalized_score}")
+        # Calculate lexical diversity (Type-Token Ratio)
+        ttr = unique_words / total_words
         
-        return normalized_score
+        # Calculate average word length
+        avg_word_length = sum(len(word) for word in words) / total_words
+        
+        # Calculate sentence complexity
+        sentences = text.split('.')
+        avg_sentence_length = total_words / max(1, len(sentences))
+        
+        # Combine metrics into clarity score
+        # Normalize each component
+        ttr_norm = min(1.0, ttr * 2)  # TTR typically ranges from 0-0.5
+        word_length_norm = max(0.0, min(1.0, 1 - (avg_word_length - 4) / 4))  # Penalize average word length > 8
+        sentence_length_norm = max(0.0, min(1.0, 1 - (avg_sentence_length - 10) / 20))  # Penalize very long sentences
+        
+        # Weighted average of components
+        clarity_score = (ttr_norm * 0.4 + word_length_norm * 0.3 + sentence_length_norm * 0.3)
+        
+        print(f"Clarity metrics:")
+        print(f"TTR: {ttr_norm}")
+        print(f"Word length: {word_length_norm}")
+        print(f"Sentence length: {sentence_length_norm}")
+        print(f"Final clarity score: {clarity_score}")
+        
+        return clarity_score
+        
     except Exception as e:
         print(f"Error calculating clarity: {str(e)}")
-        return 0.5
+        raise
 
 if __name__ == "__main__":
     import uvicorn

@@ -364,20 +364,28 @@ export default function Page() {
   const handleAnalyze = async () => {
     try {
       setIsAnalyzing(true);
+      
+      // Use uploaded document text if available, otherwise use input
+      const textToAnalyze = uploadedDoc ? uploadedDoc.text : input;
+      
+      if (!textToAnalyze || textToAnalyze.trim() === '') {
+        throw new Error('Please upload a document or enter text to analyze');
+      }
+      
       const response = await fetch(`${API_CONFIG.MAIN_API_URL}${API_CONFIG.ENDPOINTS.ANALYZE}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ text: input }),
+        body: JSON.stringify({ text: textToAnalyze }),
       });
       
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || "Failed to analyze text");
+      const data = await response.json();
+      
+      if (data.status === "error") {
+        throw new Error(data.message || "Failed to analyze text");
       }
       
-      const data = await response.json();
       setAnalysisResult(data.analysis);
     } catch (err) {
       console.error("Analysis failed:", err);
@@ -584,9 +592,9 @@ export default function Page() {
 
   //consistency analysis
   const runConsistency = async () => {
-    if (!uploadedDoc) return;
-  
-    setIsAnalyzingConsistency(true); // START
+    if (!uploadedDoc?.text) return;
+    
+    setIsAnalyzingConsistency(true);
     try {
       const response = await fetch(`${API_CONFIG.MAIN_API_URL}${API_CONFIG.ENDPOINTS.CONSISTENCY}`, {
         method: "POST",
@@ -594,23 +602,30 @@ export default function Page() {
           "Content-Type": "application/json",
           "Accept": "application/json"
         },
-        body: JSON.stringify({ chunks: [uploadedDoc.text] }),
+        body: JSON.stringify({ 
+          text: uploadedDoc.text,
+          doc_id: uploadedDoc.name 
+        }),
       });
   
       if (!response.ok) throw new Error("Consistency analysis failed.");
   
       const data = await response.json();
-      setConsistencyResult({
-        consistency_score: data.consistency_score ?? null,
-        consistency_variability: data.consistency_variability ?? null,
-        readability_score: data.readability_score ?? null,
-        clarity_score: data.clarity_score ?? null,
-      });
+      if (data.status === 'success' && data.analysis) {
+        setConsistencyResult({
+          consistency_score: data.analysis.consistency_score ?? null,
+          consistency_variability: data.analysis.consistency_variability ?? null,
+          readability_score: data.analysis.readability_score ?? null,
+          clarity_score: data.analysis.clarity_score ?? null,
+        });
+      } else {
+        throw new Error("Invalid response format");
+      }
     } catch (error) {
       console.error("Consistency error:", error);
       setConsistencyResult(null);
     } finally {
-      setIsAnalyzingConsistency(false); // END
+      setIsAnalyzingConsistency(false);
     }
   };
   
