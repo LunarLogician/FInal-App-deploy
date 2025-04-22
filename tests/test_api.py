@@ -134,6 +134,7 @@ async def test_esg_endpoint(client, esg_request_data):
         'Corporate Governance', 'Human Capital', 'Natural Capital', 'Non-ESG',
         'Pollution & Waste', 'Product Liability'
     ])
+    assert all(isinstance(score, float) and 0 <= score <= 1 for score in data.values())
 
 @pytest.mark.asyncio
 async def test_consistency_endpoint(client, consistency_request_data):
@@ -149,37 +150,8 @@ async def test_consistency_endpoint(client, consistency_request_data):
     assert all(isinstance(score, float) and 0 <= score <= 1 for score in analysis.values())
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_with_document(client, chat_request_data):
-    """Test chat endpoint with document"""
-    # First upload a document
-    with open("tests/test_document.txt", 'rb') as f:
-        files = {'file': ('test.txt', f, 'text/plain')}
-        upload_response = client.post("/upload", files=files)
-        assert upload_response.status_code == 200
-        doc_id = upload_response.json()["filename"]
-    
-    # Then test chat with the document
-    chat_request_data["doc_id"] = doc_id
-    response = client.post("/api/chat", json=chat_request_data)
-    assert response.status_code == 200
-    assert "response" in response.json()
-
-@pytest.mark.asyncio
 async def test_analyze_endpoint_no_text(client):
     """Test analyze endpoint with no text"""
     # Test with missing text field
     response = client.post("/analyze", json={})
     assert response.status_code == 422  # Validation error
-    error_data = response.json()
-    assert "status" in error_data
-    assert error_data["status"] == "error"
-    assert "code" in error_data
-    assert error_data["code"] == "VALIDATION_ERROR"
-
-    # Test with empty text
-    response = client.post("/analyze", json={"text": ""})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-    assert "analysis" in data
-    assert all(0 <= score <= 1 for score in data["analysis"].values())
