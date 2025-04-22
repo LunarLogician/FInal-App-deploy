@@ -20,6 +20,9 @@ import textstat
 import numpy as np
 import uuid
 
+# Initialize document cache
+document_cache = {}
+
 app = FastAPI(title="Combined API Service")
 
 # Custom exception handlers

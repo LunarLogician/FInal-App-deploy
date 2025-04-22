@@ -84,66 +84,36 @@ export default function LeftPanelInput({
       setError('');
 
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', file, file.name);
       
-      // Upload file to the correct endpoint
+      console.log('Uploading file:', file.name);
+      
       const response = await fetch(`${API_CONFIG.MAIN_API_URL}${API_CONFIG.ENDPOINTS.UPLOAD}`, {
         method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-        },
         body: formData
       });
       
+      console.log('Upload response status:', response.status);
+      
       if (!response.ok) {
-        throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({ message: 'Failed to parse error response' }));
+        console.error('Upload error:', errorData);
+        throw new Error(errorData.message || `Upload failed: ${response.status}`);
       }
 
-      let uploadData;
-      try {
-        uploadData = await response.json();
-      } catch (e) {
-        console.error('Failed to parse upload response:', e);
-        throw new Error('Server returned invalid JSON response');
-      }
+      const uploadData = await response.json();
+      console.log('Upload successful:', uploadData);
       
       if (uploadData.status === 'error') {
         throw new Error(uploadData.message || 'Upload failed');
       }
       
-      console.log('File uploaded successfully:', uploadData);
-      
       if (!uploadData.text) {
         throw new Error('No text content extracted from file');
       }
 
-      // Call onUploadComplete with the extracted text
       onUploadComplete(uploadData.filename, uploadData.text);
 
-      // Analyze the text using the correct endpoint
-      const analyzeResponse = await fetch(`${API_CONFIG.MAIN_API_URL}${API_CONFIG.ENDPOINTS.ANALYZE}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({ text: uploadData.text }),
-      });
-
-      let analyzeData;
-      try {
-        analyzeData = await analyzeResponse.json();
-      } catch (e) {
-        console.error('Failed to parse analysis response:', e);
-        throw new Error('Server returned invalid response during analysis');
-      }
-
-      if (!analyzeResponse.ok) {
-        const errorMessage = analyzeData?.message || 'Analysis failed';
-        throw new Error(errorMessage);
-      }
-
-      // Upload to Pinecone
       await embedAndUploadToPinecone(uploadData.text, uploadData.filename);
 
       return uploadData;
